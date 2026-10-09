@@ -1,0 +1,12 @@
+# 忽略这三个指定文件
+GT工艺验证模板.pptx
+requirements.txt
+需求.txt
+
+# 常规 Python 忽略
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+output/
+*.log
