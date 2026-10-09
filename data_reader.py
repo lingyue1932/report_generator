@@ -308,6 +308,74 @@ def parse_wuliao(raw):
 
 
 # ============================================================
+# 1.5) 空洞率（CP 实测结果 sheet）
+# ============================================================
+def parse_kongdong(raw):
+    """解析“空洞率”sheet：
+      器件行（合并单元格，器件名在段首列）
+      profile 行（每个器件分段下的 profile 名）
+      空洞率 值行
+
+    返回 (values, profiles)：
+      values  = {profile序号: {器件: float}}   # 序号按器件内列顺序 1..N，
+                                              # 与 CP 图片文件夹编号 1-x/2-x 对应
+      profiles = {器件: {profile序号: profile名}}
+    """
+    dev_row = prof_row = val_row = None
+    for ri, row in enumerate(raw):
+        t = row_texts(row)
+        first = t[0] if t else None
+        if first == "器件":
+            dev_row = ri
+        elif first == "profile" and dev_row is not None:
+            prof_row = ri
+        elif first in ("空洞率", "孔洞率") and prof_row is not None:
+            val_row = ri
+            break
+    if dev_row is None or prof_row is None or val_row is None:
+        return {}, {}
+
+    def _cells(ri):
+        return row_texts(raw[ri]) if 0 <= ri < len(raw) else []
+
+    def _num_cells(ri):
+        # 值行：row_texts 会把非字符串清成 None，这里保留数值
+        row = raw[ri] if 0 <= ri < len(raw) else []
+        return [c.strip() if isinstance(c, str) else c for c in row]
+
+    dev_cells = _cells(dev_row)
+    prof_cells = _cells(prof_row)
+    val_cells = _num_cells(val_row)
+
+    # 器件分段：器件名在段首列（合并单元格只在首列有值），延伸到下一个器件名
+    # 第 0 列是行标签“器件”，不参与分段
+    starts = [ci for ci, c in enumerate(dev_cells) if c and ci > 0]
+    spans = []
+    for i, sc in enumerate(starts):
+        ec = starts[i + 1] if i + 1 < len(starts) else max(len(prof_cells),
+                                                           len(dev_cells))
+        spans.append((dev_cells[sc], sc, ec))
+
+    values, profiles = {}, {}
+    for dev, sc, ec in spans:
+        no = 0
+        for ci in range(sc, ec):
+            pname = prof_cells[ci] if ci < len(prof_cells) else None
+            if not pname:
+                continue
+            no += 1
+            profiles.setdefault(dev, {})[no] = pname
+            v = val_cells[ci] if ci < len(val_cells) else None
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                v = None
+            if v is not None:
+                values.setdefault(no, {})[dev] = v
+    return values, profiles
+
+
+# ============================================================
 # 2) 位置精度（表头自适应）
 # ============================================================
 def parse_weizhi_jingdu(raw):
@@ -619,6 +687,10 @@ def main(data_file=None):
             DATA["可靠性-T500"] = parse_reliability(
                 load_sheet_raw("可靠性-T500", wb),
                 ["TCT500", "UDH500"])
+        if "空洞率" in all_sheets:
+            vals, profs = parse_kongdong(load_sheet_raw("空洞率", wb))
+            DATA["空洞率"] = vals
+            DATA["空洞率_profiles"] = profs
 
         return DATA
     finally:

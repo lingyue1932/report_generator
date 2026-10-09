@@ -152,10 +152,10 @@ def _num(v):
 
 
 def _pct(v):
-    """0.1 -> 10%；10 -> 10%"""
+    """单元格里已是百分数（0.6 = 0.6%），直接加 % 号"""
     if v is None:
         return "/"
-    return f"{v * 100:g}%" if abs(v) <= 1 else f"{v:g}%"
+    return f"{v:g}%"
 
 
 # ============================================================
@@ -215,6 +215,8 @@ def _fill_table(shape, data, device_name, profiles):
         _remove_extra_rows(table, need)
 
     spec = hole_spec(data, device_name)
+    # profile 名（来自“空洞率”sheet），用于条件列显示；缺省回退 Profile{n}
+    names = data.get("空洞率_profiles", {}).get(device_name, {}) or {}
     results = []
     for ri, (no, (_, a_img)) in enumerate(profiles.items()):
         row = ri + 1
@@ -225,7 +227,8 @@ def _fill_table(shape, data, device_name, profiles):
         else:
             ok = meas <= spec
             row_concl = "符合" if ok else "不符合"
-        vals = [f"Profile{no}", "", _pct(meas), _pct(spec), row_concl]
+        cond_label = str(names.get(no) or f"Profile{no}")
+        vals = [cond_label, "", _pct(meas), _pct(spec), row_concl]
         for ci, v in enumerate(vals):
             if ci < len(table.columns):
                 _set_cell_text(table.cell(row, ci), v, ref)

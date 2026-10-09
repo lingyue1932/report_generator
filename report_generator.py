@@ -171,22 +171,23 @@ def _parse_pos_bound(pos_str):
 
 
 def _fmt_void_spec(v):
-    """空洞率SPEC格式化：0.05 -> 5（与 slide_CP._pct 同口径，0~1 视为小数）"""
+    """空洞率格式化：单元格里已是百分数（0.6 = 0.6%），直接输出不换算"""
     if v is None or v == "":
         return "N/A"
     try:
         f = float(v)
     except (TypeError, ValueError):
         return str(v)
-    return f"{f * 100:g}" if abs(f) <= 1 else f"{f:g}"
+    return f"{f:g}"
 
 
 def build_slide2_table_data(data):
     """构建第二页汇总表格数据
     精度结果 = 类似作图：各样本减均值后，标准差的最大值（排除angle）
     Die shear结果 = 所有可靠性条件、所有profile、所有样本剪切力原始数据的最小值
-    结论 = 精度结果<=精度SPEC 且 Die shear结果>=剪切力SPEC ? PASS : FAIL
-    空洞率SPEC 来自物料信息 SPEC 表“空洞率”列，空洞率结果暂空置，不参与结论
+    结论 = 精度结果<=精度SPEC 且 Die shear结果>=剪切力SPEC 且 空洞率结果<=空洞率SPEC ? PASS : FAIL
+    空洞率SPEC 来自物料信息 SPEC 表“空洞率”列，空洞率结果取“空洞率”sheet 各
+    profile 实测最大值（最差）；结果为空时显示 "/" 且不参与判定
     """
     spec = data.get("物料信息", {}).get("spec", {})
     position_data = data.get("位置精度", {})
@@ -253,6 +254,19 @@ def build_slide2_table_data(data):
                         all_vals.append(float(raw))
         shear_results[dev_name] = min(all_vals) if all_vals else 0.0
 
+    # 空洞率结果：取该器件所有 profile 实测值的最大值（最差），“空洞率”sheet
+    void_results = {}
+    void_data = data.get("空洞率", {}) or {}
+    for dev_name in spec.keys():
+        vals = []
+        for prof_vals in void_data.values():
+            if not isinstance(prof_vals, dict):
+                continue
+            v = prof_vals.get(dev_name)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                vals.append(float(v))
+        void_results[dev_name] = max(vals) if vals else None
+
     rows = []
     for dev_name, spec_val in spec.items():
         pos_spec = spec_val.get("位置", "N/A")
@@ -260,18 +274,31 @@ def build_slide2_table_data(data):
         prec_result = precision_results.get(dev_name, 0.0)
         shear_result = shear_results.get(dev_name, 0.0)
 
-        # 结论：两项都满足SPEC -> PASS
+        # 结论：精度 + Die shear + 空洞率三项都满足SPEC -> PASS
         pos_bound = _parse_pos_bound(pos_spec)
         pass_pos = pos_bound is not None and prec_result <= pos_bound
         pass_shear = (isinstance(shear_spec, (int, float))
                       and shear_result >= shear_spec)
-        conclusion = "PASS" if (pass_pos and pass_shear) else "FAIL"
+        void_spec_raw = spec_val.get("空洞率")
+        void_result = void_results.get(dev_name)
+        pass_void = None
+        if (isinstance(void_spec_raw, (int, float))
+                and not isinstance(void_spec_raw, bool)
+                and void_result is not None):
+            pass_void = void_result <= float(void_spec_raw)
+
+        if not pass_pos or not pass_shear or pass_void is False:
+            conclusion = "FAIL"
+        else:
+            # 空洞率结果为空时不参与判定（只看精度 + Die shear）
+            conclusion = "PASS"
 
         shear_spec_s = f"{shear_spec:.2f}" if isinstance(shear_spec, (int, float)) else str(shear_spec)
         void_spec = _fmt_void_spec(spec_val.get("空洞率"))
+        void_result_s = _fmt_void_spec(void_result) if void_result is not None else "/"
         rows.append([dev_name, str(pos_spec), f"{prec_result:.4f}",
                       shear_spec_s, f"{shear_result:.2f}",
-                      void_spec, "", conclusion, ""])
+                      void_spec, void_result_s, conclusion, ""])
     return rows
 
 
