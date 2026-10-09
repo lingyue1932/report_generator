@@ -104,7 +104,8 @@ def row_texts(row):
 
 
 def is_profile_name(s):
-    return isinstance(s, str) and s.strip().lower().startswith("profile")
+    # profile 名不一定以 "profile" 开头（如 "Vendor profile"），按包含匹配
+    return isinstance(s, str) and "profile" in s.strip().lower()
 
 
 # ============================================================
@@ -354,7 +355,7 @@ def parse_weizhi_jingdu(raw):
         devs = []
         for ci in range(pstart, pend):
             cell = dev_row[ci] if ci < len(dev_row) else None
-            if cell and not cell.strip().lower().startswith("profile"):
+            if cell and "profile" not in cell.strip().lower():
                 devs.append((cell.strip(), ci))
 
         dims_per_profile[pname] = {}
@@ -471,16 +472,28 @@ def parse_reliability(raw, block_titles, default_block_name=None):
             continue
 
         profile_row = row_texts(raw[profile_row_idx])
-        profile_cols = {}
-        for ci, cell in enumerate(profile_row):
-            if is_profile_name(cell):
-                profile_cols[cell.strip()] = ci
 
         # --- 器件行 ---
         dev_row_idx = profile_row_idx + 1
         if dev_row_idx >= end:
             continue
         dev_row = row_texts(raw[dev_row_idx])
+
+        # --- 分组：SN 列作为分组边界，只识别写了 profile 名的分组 ---
+        # profile 标签故意留空的分组不识别、不解析；若不以 SN 列切分边界，
+        # 这些无名分组会被并入上一个分组，其 SN 列会被误当成器件名。
+        labels = {ci: c.strip() for ci, c in enumerate(profile_row)
+                  if is_profile_name(c)}
+        sn_start_cols = [ci for ci, c in enumerate(dev_row)
+                         if isinstance(c, str) and c.strip().lower() == "sn"]
+        starts = sorted(set(labels) | set(sn_start_cols))
+        if not starts:
+            continue
+        profile_cols = {}
+        for col in starts:
+            if col in labels:
+                profile_cols[labels[col]] = col
+            # else: profile 名为空 -> 故意不识别，跳过该分组
 
         # --- 维度行 ---
         dim_row_idx = dev_row_idx + 1
@@ -502,7 +515,8 @@ def parse_reliability(raw, block_titles, default_block_name=None):
             devs = []
             for ci in range(pstart + 1, pend):   # ★ 从 pstart+1 开始，跳过 SN 列
                 cell = dev_row[ci] if ci < len(dev_row) else None
-                if cell and not cell.strip().lower().startswith("profile"):
+                if cell and "profile" not in cell.strip().lower() \
+                        and cell.strip().lower() != "sn":
                     devs.append((cell.strip(), ci))
 
             dims_per_profile[pname] = {}

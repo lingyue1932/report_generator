@@ -14,6 +14,7 @@ sys.path.insert(0, BASE_DIR)
 
 from pptx import Presentation
 from pptx.util import Inches, Pt, Cm
+from pptx.dml.color import RGBColor
 from pptx.oxml.ns import qn
 
 import parameter as P
@@ -169,11 +170,23 @@ def _parse_pos_bound(pos_str):
     return float(m.group(1)) if m else None
 
 
+def _fmt_void_spec(v):
+    """空洞率SPEC格式化：0.05 -> 5（与 slide_CP._pct 同口径，0~1 视为小数）"""
+    if v is None or v == "":
+        return "N/A"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return f"{f * 100:g}" if abs(f) <= 1 else f"{f:g}"
+
+
 def build_slide2_table_data(data):
     """构建第二页汇总表格数据
     精度结果 = 类似作图：各样本减均值后，标准差的最大值（排除angle）
     Die shear结果 = 所有可靠性条件、所有profile、所有样本剪切力原始数据的最小值
     结论 = 精度结果<=精度SPEC 且 Die shear结果>=剪切力SPEC ? PASS : FAIL
+    空洞率SPEC 来自物料信息 SPEC 表“空洞率”列，空洞率结果暂空置，不参与结论
     """
     spec = data.get("物料信息", {}).get("spec", {})
     position_data = data.get("位置精度", {})
@@ -255,8 +268,10 @@ def build_slide2_table_data(data):
         conclusion = "PASS" if (pass_pos and pass_shear) else "FAIL"
 
         shear_spec_s = f"{shear_spec:.2f}" if isinstance(shear_spec, (int, float)) else str(shear_spec)
+        void_spec = _fmt_void_spec(spec_val.get("空洞率"))
         rows.append([dev_name, str(pos_spec), f"{prec_result:.4f}",
-                      shear_spec_s, f"{shear_result:.2f}", conclusion])
+                      shear_spec_s, f"{shear_result:.2f}",
+                      void_spec, "", conclusion, ""])
     return rows
 
 
@@ -519,8 +534,8 @@ def fill_slide2(prs, data):
     table_shapes = [s for s in slide2.shapes if s.has_table]
     if table_shapes:
         table = table_shapes[0].table
-        headers = ["NO.", "项目", "精度SPEC", "精度结果",
-                   "Die shear SPEC", "Die shear结果", "结论"]
+        headers = ["NO.", "项目", "精度SPEC/mm", "精度结果/mm",
+                   "Die shear SPEC/g", "Die shear结果/g","空洞率SPEC/%","空洞率结果/%", "结论", "备注"]
         while len(table.columns) < len(headers):
             _add_table_col(table)
         for ci, h in enumerate(headers):
@@ -544,6 +559,38 @@ def fill_slide2(prs, data):
 
         _fix_slide2_table_style(table_shapes[0], SLIDE2_TABLE_FONT,
                                 SLIDE2_TABLE_WIDTH_CM, SLIDE2_TABLE_HEIGHT_CM)
+
+        # 结论列配色：PASS 绿色加粗 / FAIL 红色加粗
+        concl_ci = headers.index("结论")
+        for ri in range(1, len(table.rows)):
+            cell = table.cell(ri, concl_ci)
+            concl = cell.text.strip().upper()
+            if concl not in ("PASS", "FAIL"):
+                continue
+            color = RGBColor(0x00, 0x80, 0x00) if concl == "PASS" else RGBColor(0xC0, 0x00, 0x00)
+            for para in cell.text_frame.paragraphs:
+                for run in para.runs:
+                    run.font.bold = True
+                    run.font.color.rgb = color
+
+        # 全部 PASS 时在表格下方加一行加粗总结论
+        shp = table_shapes[0]
+        # 增删行后同步图形框高度为实际行高之和，避免与表格错位
+        total_h = sum(r.height for r in table.rows)
+        if total_h:
+            shp.height = total_h
+        concl_cells = [table.cell(ri, concl_ci).text.strip().upper()
+                       for ri in range(1, len(table.rows))]
+        if concl_cells and all(c == "PASS" for c in concl_cells):
+            tb = slide2.shapes.add_textbox(
+                shp.left, shp.top + shp.height + Cm(0.2),
+                shp.width, Cm(1.0))
+            tf = tb.text_frame
+            tf.word_wrap = True
+            run = tf.paragraphs[0].add_run()
+            run.text = "结论：所有项目均满足SPEC，DOE PASS"
+            _set_run_font(run, FONT_LATIN, FONT_EA, 16)
+            run.font.bold = True
 
 
 def build_position_summary(data):
@@ -597,7 +644,6 @@ def fill_pptx():
     """
     data_file = P.DATA_FILE
     template_path = P.TEMPLATE_PATH
-    output_path = P.OUTPUT_PATH
     cp_base_dir = P.CP_BASE_DIR
 
     missing = [p for p in (data_file, template_path) if not os.path.isfile(p)]
@@ -606,6 +652,18 @@ def fill_pptx():
             "以下路径不存在，请检查 parameter.py 中的配置：\n  " + "\n  ".join(missing))
 
     P.ensure_image_dirs()
+
+    print("1/4 加载数据...")
+    print(f"  数据: {data_file}")
+    print(f"  模板: {template_path}")
+    data = load_data(data_file)
+    specs = P.build_specs(data.get("物料信息", {}).get("spec", {}))
+
+    # 输出报告名：{project_name}_GT工艺验证报告.pptx（project_name 取自 Excel）
+    import re as _re
+    project_name = str(data.get("物料信息", {}).get("project_name") or "").strip()
+    safe_name = _re.sub(r'[\\/:*?"<>|]', "_", project_name) or "DOE"
+    output_path = P.OUTPUT_PATH_FMT.format(project_name=safe_name)
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -615,11 +673,6 @@ def fill_pptx():
             os.remove(output_path)
         except Exception:
             pass
-    print("1/4 加载数据...")
-    print(f"  数据: {data_file}")
-    print(f"  模板: {template_path}")
-    data = load_data(data_file)
-    specs = P.build_specs(data.get("物料信息", {}).get("spec", {}))
 
     print("=" * 50)
     print("2/4 生成图表...")

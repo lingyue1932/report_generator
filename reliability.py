@@ -65,6 +65,12 @@ def jitter_scatter(ax, data, x_pos, color, jitter_width=0.18, size=10):
                alpha=0.6, edgecolors="white", linewidths=0.3, zorder=3)
 
 
+# 未配置颜色的 profile 使用的备选色（按出现顺序循环取）
+FALLBACK_PROFILE_COLORS = [
+    "#4CAF50", "#9C27B0", "#FF5722", "#009688", "#795548", "#607D8B",
+]
+
+
 # ============================================================
 # 单个器件绘图
 # ============================================================
@@ -73,7 +79,17 @@ def plot_device(device_name, dim_name, all_data, out_path, specs):
     all_data: {condition: {profile: {device: {dim: [values]}}}}
     specs: parameter.SpecConfig
     """
-    profiles = sorted(P.RELIABILITY_PROFILE_COLORS.keys())
+    # profile 列表按数据实际出现顺序（Excel 列顺序）动态识别，
+    # 不再依赖 RELIABILITY_PROFILE_COLORS 的 key，否则 Vendor profile 等
+    # 未配色的 profile 会被整段跳过
+    profiles = []
+    for cond_data in all_data.values():
+        for prof in cond_data:
+            if prof not in profiles:
+                profiles.append(prof)
+    colors = {p: P.RELIABILITY_PROFILE_COLORS.get(p)
+              or FALLBACK_PROFILE_COLORS[i % len(FALLBACK_PROFILE_COLORS)]
+              for i, p in enumerate(profiles)}
     cond_groups = P.RELIABILITY_COND_GROUPS
 
     # ---------- 收集 slots ----------
@@ -139,7 +155,7 @@ def plot_device(device_name, dim_name, all_data, out_path, specs):
     def draw_on(ax, ylim_lo, ylim_hi):
         for si in slots:
             xp, vals = si["x"], si["vals"]
-            color = P.RELIABILITY_PROFILE_COLORS.get(si["prof"], "#888")
+            color = colors.get(si["prof"], "#888")
 
             bp = ax.boxplot(
                 [vals], positions=[xp], widths=P.BOX_WIDTH,
@@ -245,8 +261,7 @@ def plot_device(device_name, dim_name, all_data, out_path, specs):
 
     # ---------- 图例 ----------
     legend_handles = [
-        Patch(facecolor=P.RELIABILITY_PROFILE_COLORS[p],
-              edgecolor="#333", label=p)
+        Patch(facecolor=colors[p], edgecolor="#333", label=p)
         for p in profiles
     ]
     ax_top.legend(handles=legend_handles, loc="upper left",

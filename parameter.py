@@ -4,11 +4,14 @@
 import os
 import re
 
-BASE_DIR = r"D:\工作\进行中\NPO PCIE 项目0.55SMGT_DOE"
+PROJECT_DIR  = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = r"D:\工作\进行中\macom 70mW DOE\macom70&285-0814"
+
+
 
 DATA_FILE = os.path.join(BASE_DIR, "DOE_data.xlsx")        # 输入：数据 Excel
-TEMPLATE_PATH = os.path.join(BASE_DIR, "GT工艺验证模板.pptx")  # 输入：PPT 模板
-OUTPUT_PATH = os.path.join(BASE_DIR, "DOE_工艺验证报告.pptx")  # 输出：生成的报告
+TEMPLATE_PATH = os.path.join(PROJECT_DIR , "GT工艺验证模板.pptx")  # 输入：PPT 模板
+OUTPUT_PATH_FMT = os.path.join(BASE_DIR, "{project_name}_GT工艺验证报告.pptx")  # 输出：报告名（{project_name} 取自 Excel 项目名）
 IMAGES_DIR = os.path.join(BASE_DIR, "images")               # 输出：图表（position/ reliability 两个子目录）
 CP_BASE_DIR = BASE_DIR                                       # 输入：切片图片目录（下面放 <器件>CP 文件夹）
 
