@@ -5,7 +5,7 @@ import os
 import re
 
 PROJECT_DIR  = os.path.dirname(os.path.abspath(__file__))
-BASE_DIR = r"D:\工作\进行中\macom 70mW DOE\macom70&285-0815"
+BASE_DIR = r"D:\工作\进行中\macom 70mW DOE\macom70&285-0814"
 
 
 
@@ -17,11 +17,14 @@ CP_BASE_DIR = BASE_DIR                                       # 输入：切片�
 
 POSITION_IMG_DIR = os.path.join(IMAGES_DIR, "position")
 RELIABILITY_IMG_DIR = os.path.join(IMAGES_DIR, "reliability")
+# 失效模式图（从 Excel 内嵌图片提取落盘）：<sheet>/<block>/<profile>_N.png
+FAILURE_IMG_DIR = os.path.join(RELIABILITY_IMG_DIR, "mode")
 
 
 def ensure_image_dirs():
     os.makedirs(POSITION_IMG_DIR, exist_ok=True)
     os.makedirs(RELIABILITY_IMG_DIR, exist_ok=True)
+    os.makedirs(FAILURE_IMG_DIR, exist_ok=True)
 
 
 FIGURE_SIZE = {
@@ -59,6 +62,27 @@ class SpecConfig:
         return self.shear_spec.get(device, RELIABILITY_SPEC_DEFAULT)
 
 
+_POS_BOUND_RE = re.compile(r'[\u00b1+-]?([\d.]+)')
+
+
+def parse_position_bound(pos_str):
+    """从 '±0.02' / '0.02' / '(±0.02，0.02)' 这类文本解析位置精度 SPEC 数值。
+
+    解析不出数字时返回 None。
+    原先 report_generator._parse_pos_bound 与 slide_position._parse_bound
+    各写了一份同样的正则，统一到这里。
+    """
+    if pos_str is None:
+        return None
+    m = _POS_BOUND_RE.search(str(pos_str))
+    if not m:
+        return None
+    try:
+        return float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
 def build_specs(spec_data):
     """从 data_reader 解析的物料信息 SPEC 表构建 SpecConfig。
 
@@ -67,12 +91,9 @@ def build_specs(spec_data):
     cfg = SpecConfig()
     for dev_name, vals in (spec_data or {}).items():
         # 位置精度 SPEC：解析 "(±0.02，0.02)" 格式
-        pos_str = vals.get("位置")
-        if pos_str and isinstance(pos_str, str):
-            m = re.search(r'[\u00b1+-]?([\d.]+)', pos_str)
-            if m:
-                bound = float(m.group(1))
-                cfg.position_spec[dev_name] = (-bound, bound, f"{dev_name} SPEC")
+        bound = parse_position_bound(vals.get("位置"))
+        if bound is not None:
+            cfg.position_spec[dev_name] = (-bound, bound, f"{dev_name} SPEC")
 
         # 剪切力 SPEC
         shear_val = vals.get("剪切力")
@@ -189,3 +210,70 @@ CP_CONCL_LEFT_CM = 1.0
 CP_CONCL_W_CM = 31.87
 CP_CONCL_H_CM = 1.2
 CP_CONCL_GAP_CM = 0.3
+
+# ============================================================
+# PPT 字体 / 字号（集中定义，原先散落在各 slide 模块里各写一份）
+# ============================================================
+FONT_EA_PPT = "微软雅黑"             # PPT 中文字体
+FONT_LATIN_PPT = "Times New Roman"   # PPT 西文字体
+FONT_SIZE_PPT_BODY = 14              # PPT 正文字号（pt）
+
+# ⚠ 第四页 DOE 参数表历史上用的是"宋体"，与其余各页（微软雅黑）不一致。
+#   保持原样不改动视觉输出；如需统一，把下一行改成 FONT_EA_PPT 即可。
+FONT_EA_PPT_DOE_TABLE = "宋体"
+
+# 封面作者名（原先硬编码在 report_generator.fill_pptx 里）
+AUTHOR_NAME = "张凌峰"
+
+# ============================================================
+# 模板页序（0-based）。各页面模块按此页序复制母版，
+# 模板页序变动会静默错位，故主流程会校验模板总页数。
+# ============================================================
+TEMPLATE_PAGE_INDEX = {
+    "cover": 0,
+    "summary": 1,
+    "material": 2,
+    "doe": 3,
+    "position": 4,
+    "reliability": 5,
+    "failure_mode": 6,
+    "cp": 7,
+}
+EXPECTED_TEMPLATE_SLIDES = 8
+
+
+def configure(data_file=None, template_path=None, output_path=None,
+              images_dir=None, cp_base_dir=None):
+    """运行时覆盖路径配置，供 CLI / GUI / 批量模式调用。
+
+    只覆盖显式传入的项，其余保持模块级默认值不变。
+    刻意使用 global：把"路径可变"这件事集中收敛在本模块内，
+    下游代码（图表、各页面模块）依旧按 `P.IMAGES_DIR` 等常量读取，
+    无需改动调用链。返回本次生效的路径字典。
+
+    output_path 为 None 时，沿用 OUTPUT_PATH_FMT（由 Excel 项目名决定文件名）。
+    """
+    global DATA_FILE, TEMPLATE_PATH, OUTPUT_PATH_FMT, IMAGES_DIR, CP_BASE_DIR
+    global POSITION_IMG_DIR, RELIABILITY_IMG_DIR, FAILURE_IMG_DIR
+
+    if template_path:
+        TEMPLATE_PATH = template_path
+    if data_file:
+        DATA_FILE = data_file
+    if output_path:
+        OUTPUT_PATH_FMT = output_path
+    if cp_base_dir:
+        CP_BASE_DIR = cp_base_dir
+    if images_dir:
+        IMAGES_DIR = images_dir
+        POSITION_IMG_DIR = os.path.join(IMAGES_DIR, "position")
+        RELIABILITY_IMG_DIR = os.path.join(IMAGES_DIR, "reliability")
+        FAILURE_IMG_DIR = os.path.join(RELIABILITY_IMG_DIR, "mode")
+
+    return {
+        "data_file": DATA_FILE,
+        "template_path": TEMPLATE_PATH,
+        "output_path_fmt": OUTPUT_PATH_FMT,
+        "images_dir": IMAGES_DIR,
+        "cp_base_dir": CP_BASE_DIR,
+    }

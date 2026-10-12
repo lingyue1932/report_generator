@@ -283,40 +283,17 @@ if __name__ == "__main__":
     specs = P.build_specs(data.get("物料信息", {}).get("spec", {}))
     P.ensure_image_dirs()
 
-    # 整理数据：{condition: {profile: {device: {dim: [values]}}}}
-    all_data = {}
-    for cond, (sheet_key, block_name) in P.RELIABILITY_MAP.items():
-        if sheet_key not in data:
-            continue
-        sheet_data = data[sheet_key]
-        if block_name not in sheet_data:
-            continue
-        block_data = sheet_data[block_name]
-        all_data[cond] = {}
-        for prof, content in block_data.items():
-            all_data[cond][prof] = {}
-            for dev_name in content:
-                if dev_name == "SN":
-                    continue
-                if isinstance(content[dev_name], dict):
-                    all_data[cond][prof][dev_name] = content[dev_name]
-
-    # 从数据中动态识别所有器件
-    all_devices = set()
-    for cond_data in all_data.values():
-        for prof_data in cond_data.values():
-            for dev_name in prof_data:
-                if dev_name != "SN":
-                    all_devices.add(dev_name)
+    # 归一化为 {condition: {profile: {device: {dim: [values]}}}}
+    # 与原 report_generator / slide_reliability 中的重复实现合并到一处
+    all_data = reader.build_reliability_view(data)
 
     # 每个器件单独出图
-    for dev_name in sorted(all_devices):
-        # 自动检测维度名：从数据中取第一个有效维度
+    for dev_name in reader.list_reliability_devices(all_data):
+        # 自动检测维度名：取第一个有效维度
         dim_name = None
         for cond_data in all_data.values():
             for prof_data in cond_data.values():
-                dev_data = prof_data.get(dev_name, {})
-                for k in dev_data:
+                for k in prof_data.get(dev_name, {}):
                     if k not in ("SN", "统计"):
                         dim_name = k
                         break

@@ -5,6 +5,7 @@
 可靠性：每个 profile 起始列默认为 SN
 """
 import os
+import re
 import pandas as pd
 from openpyxl import load_workbook
 
@@ -658,6 +659,196 @@ def parse_reliability(raw, block_titles, default_block_name=None):
 
 
 # ============================================================
+# 1.6) 失效模式图（Excel 内嵌图片 -> 磁盘文件 -> data）
+# ============================================================
+FAILURE_IMG_KEY = "失效模式图"
+
+_IMG_EXTS = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "gif": ".gif",
+             "bmp": ".bmp", "tif": ".tiff", "tiff": ".tiff"}
+
+
+def _san_name(s):
+    return re.sub(r"[^\w.-]+", "_", str(s).strip()).strip("_") or "x"
+
+
+def _sniff_ext(blob):
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if blob[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if blob[:6] in (b"GIF87a", b"GIF89a"):
+        return ".gif"
+    if blob[:2] in (b"II", b"MM"):
+        return ".tiff"
+    if blob[:2] == b"BM":
+        return ".bmp"
+    return ".png"
+
+
+def _block_ranges(raw, block_titles, default_block_name=None):
+    """区块行范围 [(块名, start行, end行)]，与 parse_reliability 同逻辑"""
+    block_pos = {}
+    for ri, row in enumerate(raw):
+        for cell in row:
+            if isinstance(cell, str):
+                t = cell.strip()
+                for bt in block_titles:
+                    if t == bt:
+                        block_pos[bt] = ri
+    if not block_pos and default_block_name:
+        block_pos[default_block_name] = 0
+    order = sorted(block_pos.items(), key=lambda x: x[1])
+    out = []
+    for bi, (bname, start) in enumerate(order):
+        end = order[bi + 1][1] if bi + 1 < len(order) else len(raw)
+        out.append((bname, start, end))
+    return out
+
+
+def extract_failure_images(wb, sheet_name, raw, block_titles,
+                           default_block_name=None, data=None):
+    """提取可靠性 sheet 内嵌的失效模式图：
+      - 图片位于区块“失效图示：”行下方，按 anchor 列就近归属 profile 列
+      - profile 标签留空的分组不识别、不导出
+      - 落盘 P.FAILURE_IMG_DIR/<sheet>/<block>/<profile>_N.<ext>
+      - 写入 data[sheet][block][profile]["失效模式图"] = [路径...]
+    """
+    try:
+        ws = wb[sheet_name]
+    except KeyError:
+        return
+    imgs = list(getattr(ws, "_images", None) or [])
+    if not imgs:
+        return
+
+    placed = []
+    for im in imgs:
+        try:
+            fr = im.anchor._from
+            placed.append((fr.row, fr.col, im))   # row/col 均 0-based
+        except AttributeError:
+            continue
+    if not placed:
+        return
+
+    if data is None:
+        data = {}
+
+    for bname, bstart, bend in _block_ranges(raw, block_titles,
+                                             default_block_name):
+        # --- profile 行与标签 ---
+        prof_row = None
+        for r in range(bstart, min(bstart + 4, bend)):
+            if any(is_profile_name(c) for c in raw[r]):
+                prof_row = r
+                break
+        if prof_row is None:
+            continue
+        labels = {ci: str(c).strip()
+                  for ci, c in enumerate(raw[prof_row]) if is_profile_name(c)}
+
+        # --- “失效图示：”行与其标签列 ---
+        fig_row = None
+        for r in range(prof_row + 1, bend):
+            if any(isinstance(c, str) and "失效图示" in c for c in raw[r]):
+                fig_row = r
+                break
+        if fig_row is None:
+            continue
+        fig_cols = [ci for ci, c in enumerate(raw[fig_row])
+                    if isinstance(c, str) and "失效图示" in c]
+        if not fig_cols:
+            continue
+
+        # --- 图片按列就近归属 profile ---
+        groups = {}
+        for row_i, col_i, im in placed:
+            if not (bstart <= row_i < bend):
+                continue
+            near = min(fig_cols, key=lambda c: (abs(c - col_i), c))
+            pname = labels.get(near)
+            if not pname:
+                continue          # 标签留空的分组不识别
+            groups.setdefault(pname, []).append((row_i, col_i, im))
+
+        block_data = data.get(sheet_name, {}).get(bname)
+        for pname, items in groups.items():
+            items.sort(key=lambda t: (t[0], t[1]))   # 上->下、左->右
+            paths = _save_failure_images(items, sheet_name, bname, pname)
+            if paths and isinstance(block_data, dict) \
+                    and isinstance(block_data.get(pname), dict):
+                block_data[pname][FAILURE_IMG_KEY] = paths
+
+
+def _save_failure_images(items, sheet_name, bname, pname):
+    out_dir = os.path.join(P.FAILURE_IMG_DIR,
+                           _san_name(sheet_name), _san_name(bname))
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for i, (_, _, im) in enumerate(items):
+        try:
+            blob = im._data()
+        except Exception:
+            continue
+        if not blob:
+            continue
+        fmt = str(getattr(im, "format", "") or "").lower()
+        ext = _IMG_EXTS.get(fmt) or _sniff_ext(blob)
+        path = os.path.join(out_dir, f"{_san_name(pname)}_{i + 1}{ext}")
+        try:
+            with open(path, "wb") as f:
+                f.write(blob)
+        except OSError:
+            continue
+        paths.append(path)
+    return paths
+
+
+# ============================================================
+# 数据视图整理
+# ============================================================
+def build_reliability_view(data):
+    """把解析结果整理为可靠性绘图 / 填充所需的嵌套结构：
+
+        {condition: {profile: {device: {dim: [values], "SN": [...], "统计": {...}}}}}
+
+    映射关系取自 parameter.RELIABILITY_MAP（显示名 -> (sheet_key, block_name)）。
+    跳过 SN 列与非 dict 条目，缺失的 sheet / block 直接略过。
+
+    这段归一化原先在 report_generator.generate_charts、
+    reliability.__main__ 和 slide_reliability.build_all_data 里各写了一遍，
+    三份逻辑一致，统一收在这里。
+    """
+    view = {}
+    for cond, (sheet_key, block_name) in P.RELIABILITY_MAP.items():
+        sheet_data = data.get(sheet_key)
+        if not isinstance(sheet_data, dict):
+            continue
+        block_data = sheet_data.get(block_name)
+        if not isinstance(block_data, dict):
+            continue
+        view[cond] = {}
+        for prof, content in block_data.items():
+            if not isinstance(content, dict):
+                continue
+            view[cond][prof] = {
+                dev_name: dev_data
+                for dev_name, dev_data in content.items()
+                if dev_name != "SN" and isinstance(dev_data, dict)
+            }
+    return view
+
+
+def list_reliability_devices(view):
+    """可靠性视图中出现过的所有器件名（排序后）。"""
+    devs = set()
+    for cond_data in view.values():
+        for prof_data in cond_data.values():
+            devs.update(prof_data.keys())
+    return sorted(devs)
+
+
+# ============================================================
 # 主流程
 # ============================================================
 def main(data_file=None):
@@ -675,18 +866,18 @@ def main(data_file=None):
             DATA["物料信息"] = parse_wuliao(load_sheet_raw("物料信息", wb))
         if "位置精度" in all_sheets:
             DATA["位置精度"] = parse_weizhi_jingdu(load_sheet_raw("位置精度", wb))
-        if "可靠性-T0" in all_sheets:
-            DATA["可靠性-T0"] = parse_reliability(
-                load_sheet_raw("可靠性-T0", wb),
-                ["T0"], default_block_name="T0")
-        if "可靠性-T168" in all_sheets:
-            DATA["可靠性-T168"] = parse_reliability(
-                load_sheet_raw("可靠性-T168", wb),
-                ["TCT168", "UDH168"])
-        if "可靠性-T500" in all_sheets:
-            DATA["可靠性-T500"] = parse_reliability(
-                load_sheet_raw("可靠性-T500", wb),
-                ["TCT500", "UDH500"])
+
+        # 可靠性：解析数值 + 提取内嵌失效模式图
+        rel_sheets = (("可靠性-T0", ["T0"], "T0"),
+                      ("可靠性-T168", ["TCT168", "UDH168"], None),
+                      ("可靠性-T500", ["TCT500", "UDH500"], None))
+        for sheet_name, titles, default in rel_sheets:
+            if sheet_name not in all_sheets:
+                continue
+            raw = load_sheet_raw(sheet_name, wb)
+            DATA[sheet_name] = parse_reliability(raw, titles, default)
+            extract_failure_images(wb, sheet_name, raw, titles, default, DATA)
+
         if "空洞率" in all_sheets:
             vals, profs = parse_kongdong(load_sheet_raw("空洞率", wb))
             DATA["空洞率"] = vals
